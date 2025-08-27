@@ -6,6 +6,11 @@ import tensorflow as tf
 from collections import deque
 import handGesters as hg
 import os
+import itertools
+import random
+import json
+from keras.models import Sequential, load_model
+from keras.layers import LSTM, Dense
 
 
 seq_len = 5
@@ -17,25 +22,54 @@ throw_names = ["rock", "paper", "scissors"]
 throw_buffer = [] # your throws: rock paper scissors  deque(maxlen=seq_len)
 outcome_buffer = [] #outcomes: "win lose draw"  deque(maxlen=seq_len)
 history_file = "history.json"
+model_file = "rps_model.h5"
+
+# Generator for random throws
+def throw_stream():
+	while True:
+		yield random.choice(throw_names)
+random_throw = throw_stream()
 
 
-
-# Load the next_throw_model if it exists else created the model
-
-try:
-	next_throw_model = tf.keras.models.load_model("next_throw_model.h5")
+# --- Load history safely ---
+if os.path.exists(history_file) and os.stat(history_file).st_size > 0:
+	try:
+		with open(history_file, "r") as f:
+			history = json.load(f)
+	except json.JSONDecodeError:
+		print("⚠️ Warning: history file corrupted, starting fresh.")
+		history = []
+else:
+	history = []
 	
-except:
-	from keras.models import Sequential
-	from keras.layers import LSTM, Dense
-	
+# --- Load or build model ---
+if os.path.exists(model_file):
+	try:
+		next_throw_model = load_model(model_file)
+		print("✅ Loaded existing model")
+	except Exception as e:
+		print(f"⚠️ Could not load model: {e}. Rebuilding fresh model.")
+		next_throw_model = Sequential([
+			LSTM(32, input_shape=(seq_len, num_features)),
+			Dense(num_classes, activation="softmax")
+		])
+		next_throw_model.compile(
+			optimizer="adam",
+			loss="categorical_crossentropy",
+			metrics=["accuracy"]
+		)
+else:
+	print("ℹ️ No model found, building fresh one.")
 	next_throw_model = Sequential([
 		LSTM(32, input_shape=(seq_len, num_features)),
-		Dense(num_classes, activation='softmax')
+		Dense(num_classes, activation="softmax")
 	])
-	next_throw_model.compile(optimizer='adam',
-		loss='categorical_crossentropy',
-		metrics=['accuracy'])
+	next_throw_model.compile(
+		optimizer="adam",
+		loss="categorical_crossentropy",
+		metrics=["accuracy"]
+	)
+	
 	
 def one_hot_throw(throw):
 	vec = np.zeros(3)
@@ -55,10 +89,13 @@ def get_lstm_input():
 	X_seq = np.hstack([throw_buffer, outcome_buffer])
 	return np.expand_dims(X_seq, axis=0)
 
+
+# +====================================
+
 def predict_next_throw():
 	if len(throw_buffer) < seq_len:
-		return np.random.choice(["Rock", "Paper", "Scissors"])
-	N = seq_len
+		return next(random_throw)
+	N = 5
 	recent_throws = throw_buffer[-N:]
 	recent_outcomes = outcome_buffer[-N:]
 	
@@ -72,17 +109,20 @@ def predict_next_throw():
 			next_moves.append(thow_buffer(i+N))
 			
 	if not next_moves:
-		return np.random.choice(["Rock", "Paper", "Scissors"])
+		return next(random_throw)
 	
-	
+	# MARK: predict next move
 	X_seq=get_lstm_input()
 	if X_seq is None:
-		return None
+		return  next(random_throw)
 	pred = next_throw_model.predict(X_seq, verbose=0)
 	predicted_throw_idx = np.argmax(pred[0])
 	return throw_names[predicted_throw_idx]
 
 def counter_throw(predicted_throw):
+	if predicted_throw is None:
+		return  next(random_throw)	
+	
 	return throw_names[(throw_map[predicted_throw] + 1) % 3]
 
 
@@ -102,14 +142,12 @@ def prepare_training_data(history, seq_len=5):
 		y.append(one_hot_throw(history[i+seq_len]["player"]))
 	return np.array(X), np.array(y)
 
-if (os.path.exists(filename) and os.stat(filename).st_size==0):
-	with open(history_file, 'r') as f:
-		history = json.load(f)
-else:
-	pass
 	
 def build_model():
 	X, y = prepare_training_data(history, seq_len = 5)
+	
+	if len(history) < seq_len:
+		return
 	# Train the LSTM
 	next_throw_model.fit(X, y, epochs=5, batch_size=16, verbose=0)
 	next_throw_model.save("next_throw_model.h5")
@@ -136,8 +174,11 @@ def get_outcome(player, ai):
 # ++++++++++++++++++++++++++++++++
 
 def play_game():
-	cap = cv2.VideoCapture(0)
+	readyForRound = False 
 	
+	
+	cap = cv2.VideoCapture(0)
+	gesture = None
 	current_throw = "none"
 	predicted_throw = None
 	ai_throw = "thinking..."
@@ -152,43 +193,44 @@ def play_game():
 		#if no throw report Ready? 
 		
 		# step 1 Detect
-		gesture, confidence = hg.analyseFrame(frame) #analize the frame looking for hands when one is found send back the landmarks? why not return throw
 		
+		gesture, confidence = hg.analyseFrame(frame) #analize the frame looking for hands when one is found send back the landmarks? why not return throw
+			
 				
 		
-		if gesture and gesture in throw_map:
-			current_throw = gesture
-			throw_buffer.append(one_hot_throw(current_throw))
-			outcome = get_outcome(current_throw, ai_throw)
-			outcome_buffer.append(outcome)
-		else: 
-			current_throw = "none"
-			
-		
-			
-		# step 2 predict next throw
-		predicted_throw = predict_next_throw()
-		if predicted_throw: 
-			ai_throw = counter_throw(predicted_throw)
-		else: 
-			ai_throw = "thinking..."
-			
-			
-		if current_throw != "none" and ai_throw != "thinking...":
-			last_outcome = get_outcome(current_throw, ai_throw)
-			
-			throw_buffer.append(one_hot_throw(current_throw))
-			outcome_buffer.append(one_hot_outcome(last_outcome))
-			
-		round_data = {"player": current_throw, "ai": ai_throw, "outcome": last_outcome}
-		
-		history.append(round_data)
-		
-		with open(history_file, "w") as f:
-			jason.dump(history,f)
-		
-		if len(history) % 20 == 0: 
-			build_model()
+#		if gesture and gesture in throw_map:
+#			current_throw = gesture
+#			throw_buffer.append(one_hot_throw(current_throw))
+#			outcome = get_outcome(current_throw, ai_throw)
+#			outcome_buffer.append(outcome)
+#		else: 
+#			current_throw = "none"
+#			
+#		
+#			
+#		# step 2 predict next throw
+#		predicted_throw = predict_next_throw()
+#		if predicted_throw: 
+#			ai_throw = counter_throw(predicted_throw)
+#		else: 
+#			ai_throw = "thinking..."
+#			
+#			
+#		if current_throw != "none" and ai_throw != "thinking...":
+#			last_outcome = get_outcome(current_throw, ai_throw)
+#			
+#			throw_buffer.append(one_hot_throw(current_throw))
+#			outcome_buffer.append(one_hot_outcome(last_outcome))
+#			
+#		round_data = {"player": current_throw, "ai": ai_throw, "outcome": last_outcome}
+#		
+#		history.append(round_data)
+#		
+#		with open(history_file, "w") as f:
+#			json.dump(history,f)
+#		
+#		if len(history) % 20 == 0: 
+#			build_model()
 		
 		# Step 3: display
 		cv2.putText(frame, f"You: {current_throw}", (10,40), cv2.FONT_HERSHEY_SIMPLEX, 1, (255,255,255), 2)

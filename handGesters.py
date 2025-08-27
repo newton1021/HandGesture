@@ -142,6 +142,8 @@ def analyseFrame(frame):
 	if model is None: 
 		initModel()
 	landmarks = preprocess(frame)
+	if landmarks is None:
+		return None, 0 # no gesture detected
 	result = predict_gesture(landmarks)
 	return result
 
